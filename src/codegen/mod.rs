@@ -70,7 +70,7 @@ impl<'ctx> Codegen<'ctx> {
     fn basic_to_type(&self, llvm: Option<BasicTypeEnum<'ctx>>) -> Type {
         match llvm {
             Some(BasicTypeEnum::IntType(t)) if t == self.context.bool_type() => Type::Bool,
-            Some(BasicTypeEnum::IntType(_)) => Type::I64,
+            Some(BasicTypeEnum::IntType(_)) => Type::I32,
             Some(BasicTypeEnum::FloatType(_)) => Type::F64,
             Some(BasicTypeEnum::PointerType(_)) => Type::Str,
             None => Type::Void,
@@ -80,7 +80,7 @@ impl<'ctx> Codegen<'ctx> {
 
     fn expr_to_type(&self, expr: &Spanned<Expression>) -> Result<Type, Error> {
         let ty = match &expr.node {
-            Expression::Integer(_) => Type::I64,
+            Expression::Integer(_) => Type::I32,
             Expression::Float(_) => Type::F64,
             Expression::Bool(_) => Type::Bool,
             Expression::String(_) => Type::Str,
@@ -358,7 +358,7 @@ impl<'ctx> Codegen<'ctx> {
 
     fn compile_expr(&mut self, expression: &Spanned<Expression>) -> Result<Option<BasicValueEnum<'ctx>>, Error> {
         let compiled: BasicValueEnum<'ctx> = match &expression.node {
-            Expression::Integer(num) => self.context.i64_type().const_int(*num as u64, false).into(),
+            Expression::Integer(num) => self.context.i32_type().const_int(*num as u64, false).into(),
             Expression::Float(num) => self.context.f64_type().const_float(*num).into(),
             Expression::Bool(num) => self.context.bool_type().const_int(*num as u64, false).into(),
             Expression::String(string) => {
