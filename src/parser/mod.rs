@@ -323,6 +323,7 @@ impl Parser {
                 if 13 < min_bp {
                     break;
                 }
+                self.advance()?;
                 let ty = self.expect_type()?;
                 spanned_left = Spanned::new(
                     Expression::As { expr: Box::new(spanned_left), ty },
