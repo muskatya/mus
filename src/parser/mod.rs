@@ -224,11 +224,16 @@ impl Parser {
                 self.advance()?;
                 let condition = self.parse_expr(0)?;
                 let then_br = self.parse_block()?;
-                let mut else_br = None;
-                if self.check(TokenKind::Else) {
+                let else_br = if self.check(TokenKind::Else) {
                     self.advance()?;
-                    else_br = Some(self.parse_block()?);
-                }
+                    if self.check(TokenKind::If) {
+                        Some(Block { stmts: vec![self.parse_stmt()?] })
+                    } else {
+                        Some(self.parse_block()?)
+                    }
+                } else {
+                    None
+                };
                 Ok(Statement::If { condition, then_br, else_br })
             },
             Some(TokenKind::While) => {
