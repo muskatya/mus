@@ -13,9 +13,15 @@ use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, IntValue, Point
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
 
+pub struct FunctionInfo<'ctx> {
+    pub value: FunctionValue<'ctx>,
+    pub ret_type: Type
+}
+
 pub struct Variable<'ctx> {
     pub ptr: PointerValue<'ctx>,
-    pub ty: BasicTypeEnum<'ctx>,
+    pub ast_ty: Type,
+    pub basic_ty: BasicTypeEnum<'ctx>,
     pub is_const: bool
 }
 
@@ -23,7 +29,7 @@ pub struct Codegen<'ctx> {
     pub context: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
-    pub functions: HashMap<String, FunctionValue<'ctx>>,
+    pub functions: HashMap<String, FunctionInfo<'ctx>>,
     pub current_function: Option<FunctionValue<'ctx>>,
     pub continue_block: Option<BasicBlock<'ctx>>,
     pub break_block: Option<BasicBlock<'ctx>>,
@@ -72,25 +78,6 @@ impl<'ctx> Codegen<'ctx> {
         Ok(basic)
     }
 
-    fn basic_to_type(&self, llvm: Option<BasicTypeEnum<'ctx>>) -> Type {
-        match llvm {
-            Some(BasicTypeEnum::IntType(t)) => match t.get_bit_width() {
-                1 => Type::Bool,
-                16 => Type::I16,
-                32 => Type::I32,
-                64 => Type::I64,
-                _ => Type::I32
-            },
-            Some(BasicTypeEnum::FloatType(t)) => match t.get_bit_width() {
-                32 => Type::F32,
-                _ => Type::F64
-            },
-            Some(BasicTypeEnum::PointerType(_)) => Type::Str,
-            None => Type::Void,
-            _ => unreachable!()
-        }
-    }
-
     fn expr_to_type(&self, expr: &Spanned<Expression>) -> Result<Type, Error> {
         let ty = match &expr.node {
             Expression::Integer(_) => Type::I32,
@@ -98,9 +85,8 @@ impl<'ctx> Codegen<'ctx> {
             Expression::Bool(_) => Type::Bool,
             Expression::Char(_) => Type::Char,
             Expression::String(_) => Type::Str,
-            Expression::Identifier(ident) => self.basic_to_type(
-                Some(self.variables.get(ident).ok_or_else(|| Error::UndefinedVariable { ident: ident.clone(), span: expr.span })?.ty)
-            ),
+            Expression::Identifier(ident) => self.variables.get(ident)
+                .ok_or_else(|| Error::UndefinedVariable { ident: ident.clone(), span: expr.span })?.ast_ty.clone(),
             Expression::BinOp { left, right, .. } => {
                 let left_ty = self.expr_to_type(left)?;
                 let right_ty = self.expr_to_type(right)?;
@@ -109,9 +95,8 @@ impl<'ctx> Codegen<'ctx> {
                 }
             },
             Expression::UnOp { operand, .. } => self.expr_to_type(operand)?,
-            Expression::Call { ident, .. } => self.basic_to_type(
-                self.functions.get(&ident.node).ok_or_else(|| Error::UndefinedFunction { ident: ident.node.clone(), span: expr.span })?.get_type().get_return_type()
-            ),
+            Expression::Call { ident, .. } => self.functions.get(&ident.node)
+                .ok_or_else(|| Error::UndefinedFunction { ident: ident.node.clone(), span: expr.span })?.ret_type.clone(),
             Expression::As { ty, .. } => ty.node.clone()
         };
         Ok(ty)
@@ -199,8 +184,8 @@ impl<'ctx> Codegen<'ctx> {
         } else {
             self.type_to_basic(&fn_extern.ret_type)?.fn_type(&param_types, is_var_args)
         };
-        let fn_val = self.module.add_function(fn_extern.name.as_str(), fn_type, None);
-        self.functions.insert(fn_extern.name.clone(), fn_val);
+        let value = self.module.add_function(fn_extern.name.as_str(), fn_type, None);
+        self.functions.insert(fn_extern.name.clone(), FunctionInfo { value, ret_type: fn_extern.ret_type.node.clone() });
         Ok(())
     }
 
@@ -219,13 +204,13 @@ impl<'ctx> Codegen<'ctx> {
         } else {
             self.type_to_basic(&function.ret_type)?.fn_type(&param_types, is_var_args)
         };
-        let fn_val = self.module.add_function(function.name.as_str(), fn_type, None);
-        self.functions.insert(function.name.clone(), fn_val);
+        let value = self.module.add_function(function.name.as_str(), fn_type, None);
+        self.functions.insert(function.name.clone(), FunctionInfo { value, ret_type: function.ret_type.node.clone() });
         Ok(())
     }
 
     fn compile_function(&mut self, function: &Function) -> Result<(), Error> {
-        let fn_val = self.functions[function.name.as_str()];
+        let fn_val = self.functions[function.name.as_str()].value;
         self.current_function = Some(fn_val);
         self.variables.clear();
         let entry = self.context.append_basic_block(fn_val, "entry");
@@ -239,7 +224,7 @@ impl<'ctx> Codegen<'ctx> {
                 .map_err(|e| Error::LLVMError { error: e.to_string() })?;
             self.builder.build_store(ptr, val)
                 .map_err(|e| Error::LLVMError { error: e.to_string() })?;
-            self.variables.insert(param.name.clone(), Variable { ptr, ty: self.type_to_basic(&param.ty)?, is_const: false });
+            self.variables.insert(param.name.clone(), Variable { ptr, ast_ty: param.ty.node.clone(), basic_ty: self.type_to_basic(&param.ty)?, is_const: false });
         }
         for stmt in &function.body.stmts {
             self.compile_statement(stmt)?;
@@ -376,15 +361,14 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn compile_variable(&mut self, ident: &str, ty: &Option<Spanned<Type>>, val: &Spanned<Expression>, is_const: bool) -> Result<(), Error> {
-        let basic_ty = self.type_to_basic(
-            &ty.clone().unwrap_or(Spanned::new(self.expr_to_type(val)?, val.span))
-        )?;
+        let ast_ty = &ty.clone().unwrap_or(Spanned::new(self.expr_to_type(val)?, val.span));
+        let basic_ty = self.type_to_basic(ast_ty)?;
         let val = self.compile_some_expr(val)?;
         let ptr = self.builder.build_alloca(basic_ty, ident)
             .map_err(|e| Error::LLVMError { error: e.to_string() })?;
         self.builder.build_store(ptr, val)
             .map_err(|e| Error::LLVMError { error: e.to_string() })?;
-        self.variables.insert(ident.to_string(), Variable { ptr, ty: basic_ty, is_const });
+        self.variables.insert(ident.to_string(), Variable { ptr, ast_ty: ast_ty.node.clone(), basic_ty, is_const });
         Ok(())
     }
 
@@ -402,7 +386,7 @@ impl<'ctx> Codegen<'ctx> {
             Expression::Identifier(ident) => {
                 let var = self.variables.get(ident)
                     .ok_or_else(|| Error::UndefinedVariable { ident: ident.clone(), span: expression.span })?;
-                self.builder.build_load(var.ty, var.ptr, "var")
+                self.builder.build_load(var.basic_ty, var.ptr, "var")
                     .map_err(|e| Error::LLVMError { error: e.to_string() })?
             },
             Expression::BinOp { left, op, right } => {
@@ -437,6 +421,7 @@ impl<'ctx> Codegen<'ctx> {
             Expression::Call { ident, args } => {
                 let func = self.functions.get(&ident.node)
                     .ok_or_else(|| Error::UndefinedFunction { ident: ident.node.clone(), span: ident.span })?
+                    .value
                     .clone();
                 let mut compiled_args = Vec::new();
                 for arg in args {
