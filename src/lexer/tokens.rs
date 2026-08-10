@@ -6,9 +6,9 @@ use std::fmt;
 pub enum TokenKind {
     Plus, Minus, Asterisk, Slash, Assign, LParen, RParen, LSquare, RSquare, LBrace, RBrace, Exclamation, Comma, Dot, Ellipsis, Semicolon,
     Greater, Lower, Eq, GreaterEq, LowerEq, NotEq,
-    Integer(i64), Float(f64), String(String), Identifier(String),
-    I64, I32, I16, I8, U64, U32, U16, U8, F64, F32, Bool, Str, Void,
-    Fn, Import, Extern, Var, Const, Return, If, Else, Or, And, As, While, For, In, True, False,
+    Integer(i64), Float(f64), CharLit(char), String(String), Identifier(String),
+    I64, I32, I16, I8, U64, U32, U16, U8, F64, F32, Bool, Char, Str, Void,
+    Fn, Import, Extern, Var, Const, Return, If, Else, Or, And, As, While, For, In, Continue, Break, True, False,
     EOF
 }
 
@@ -39,6 +39,7 @@ impl fmt::Display for TokenKind {
             TokenKind::NotEq => "!=",
             TokenKind::Integer(_) => "int literal",
             TokenKind::Float(_) => "float literal",
+            TokenKind::CharLit(_) => "char literal",
             TokenKind::String(_) => "string literal",
             TokenKind::Identifier(_) => "identifier",
             TokenKind::I64 => "i64",
@@ -52,6 +53,7 @@ impl fmt::Display for TokenKind {
             TokenKind::F64 => "f64",
             TokenKind::F32 => "f32",
             TokenKind::Bool => "bool",
+            TokenKind::Char => "char",
             TokenKind::Str => "str",
             TokenKind::Void => "void",
             TokenKind::Fn => "fn",
@@ -68,6 +70,8 @@ impl fmt::Display for TokenKind {
             TokenKind::While => "while",
             TokenKind::For => "for",
             TokenKind::In => "in",
+            TokenKind::Continue => "continue",
+            TokenKind::Break => "break",
             TokenKind::True => "true",
             TokenKind::False => "false",
             TokenKind::EOF => "eof"
