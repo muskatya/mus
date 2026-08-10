@@ -1,4 +1,4 @@
-use crate::errors::Spanned;
+use crate::errors::{Span, Spanned};
 
 use std::fmt;
 
@@ -8,6 +8,7 @@ pub enum Type {
     U64, U32, U16, U8,
     F64, F32,
     Bool,
+    Char,
     Str,
     Void,
     Ellipsis
@@ -27,6 +28,7 @@ impl fmt::Display for Type {
             Type::F64 => write!(f, "f64"),
             Type::F32 => write!(f, "f32"),
             Type::Bool => write!(f, "bool"),
+            Type::Char => write!(f, "char"),
             Type::Str => write!(f, "str"),
             Type::Void => write!(f, "void"),
             Type::Ellipsis => write!(f, "...")
@@ -104,6 +106,8 @@ pub enum Statement {
         iterable: Spanned<Expression>,
         body: Block
     },
+    Continue(Span),
+    Break(Span),
     Return(Option<Spanned<Expression>>)
 }
 
@@ -112,6 +116,7 @@ pub enum Expression {
     Integer(i64),
     Float(f64),
     Bool(bool),
+    Char(char),
     String(String),
     Identifier(String),
     BinOp {
