@@ -66,6 +66,7 @@ impl Parser {
             TokenKind::U64 => Type::U64, TokenKind::U32 => Type::U32, TokenKind::U16 => Type::U16, TokenKind::U8 => Type::U8,
             TokenKind::F64 => Type::F64, TokenKind::F32 => Type::F32,
             TokenKind::Bool => Type::Bool,
+            TokenKind::Char => Type::Char,
             TokenKind::Str => Type::Str,
             TokenKind::Void => Type::Void,
             _ => return Err(Error::UnexpectedToken { expected: vec![
@@ -73,6 +74,7 @@ impl Parser {
                 TokenKind::U64, TokenKind::U32, TokenKind::U16, TokenKind::U8,
                 TokenKind::F64, TokenKind::F32,
                 TokenKind::Bool,
+                TokenKind::Char,
                 TokenKind::Str,
                 TokenKind::Void
             ], got: token.kind.clone(), span: token.span })
@@ -87,6 +89,7 @@ impl Parser {
                 TokenKind::U64 | TokenKind::U32 | TokenKind::U16 | TokenKind::U8 |
                 TokenKind::F64 | TokenKind::F32 |
                 TokenKind::Bool |
+                TokenKind::Char |
                 TokenKind::Str |
                 TokenKind::Void
             )
@@ -242,6 +245,16 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Statement::For { var, iterable, body })
             },
+            Some(TokenKind::Continue) => {
+                let span = self.advance()?.span;
+                self.expect(TokenKind::Semicolon)?;
+                Ok(Statement::Continue(span))
+            },
+            Some(TokenKind::Break) => {
+                let span = self.advance()?.span;
+                self.expect(TokenKind::Semicolon)?;
+                Ok(Statement::Break(span))
+            },
             Some(TokenKind::Return) => {
                 self.advance()?;
                 if self.check(TokenKind::Semicolon) {
@@ -284,6 +297,7 @@ impl Parser {
             TokenKind::Float(f) => Expression::Float(*f),
             TokenKind::True => Expression::Bool(true),
             TokenKind::False => Expression::Bool(false),
+            TokenKind::CharLit(c) => Expression::Char(*c),
             TokenKind::String(s) => Expression::String(s.clone()),
             TokenKind::Identifier(i) => {
                 let ident = i.clone();
@@ -312,7 +326,7 @@ impl Parser {
             _ => {
                 return Err(Error::UnexpectedToken { expected: vec![
                     TokenKind::Integer(0), TokenKind::Float(0.0), TokenKind::True, TokenKind::False,
-                    TokenKind::String(String::new()), TokenKind::Identifier(String::new()), TokenKind::Minus,
+                    TokenKind::CharLit('0'), TokenKind::String(String::new()), TokenKind::Identifier(String::new()), TokenKind::Minus,
                     TokenKind::Exclamation, TokenKind::LParen
                 ], got: token.kind.clone(), span: token.span });
             }
