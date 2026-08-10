@@ -36,9 +36,7 @@ impl Lexer {
     pub fn tokenize(&mut self) -> Result<(), Error> {
         while !self.is_eof() {
             self.skip_whitespaces();
-            if self.is_eof() {
-                break;
-            }
+            if self.is_eof() { break; }
             let c = self.chars[self.pos];
             match c {
                 '+' => self.tokens.push(Token::new(TokenKind::Plus, self.span())),
@@ -118,6 +116,24 @@ impl Lexer {
                     self.tokens.push(token);
                     continue;
                 },
+                '\'' => {
+                    let span = self.span();
+                    self.advance();
+                    if self.is_eof() {
+                        return Err(Error::UnclosedChar { span });
+                    }
+                    if self.chars[self.pos] == '\'' {
+                        return Err(Error::EmptyChar { span });
+                    }
+                    let ch = match self.chars[self.pos] {
+                        '\\' => self.lex_escape()?,
+                        c => { self.advance(); c }
+                    };
+                    if self.is_eof() || self.chars[self.pos] != '\'' {
+                        return Err(Error::UnclosedChar { span });
+                    }
+                    self.tokens.push(Token::new(TokenKind::CharLit(ch), span));
+                },
                 '"' => {
                     let token = self.lex_string()?;
                     self.tokens.push(token);
@@ -139,9 +155,7 @@ impl Lexer {
     fn skip_whitespaces(&mut self) {
         while !self.is_eof() {
             let c = self.chars[self.pos];
-            if !c.is_whitespace() {
-                break;
-            }
+            if !c.is_whitespace() { break; }
             if c == '\n' {
                 if let Some(t) = self.tokens.last() && !matches!(t.kind,
                     TokenKind::Semicolon | TokenKind::Comma | TokenKind::Dot |
@@ -201,6 +215,23 @@ impl Lexer {
         }
     }
 
+    fn lex_escape(&mut self) -> Result<char, Error> {
+        let span = self.span();
+        self.advance();
+        let res = match self.chars[self.pos] {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            '0' => '0',
+            '\\' => '\\',
+            '"' => '"',
+            '\'' => '\'',
+            e => return Err(Error::InvalidEscape { escape: format!("\\{}", e), span })
+        };
+        self.advance();
+        Ok(res)
+    }
+
     fn lex_string(&mut self) -> Result<Token, Error> {
         let span = self.span();
         let mut string = String::new();
@@ -209,17 +240,9 @@ impl Lexer {
             let c = self.chars[self.pos];
             match c {
                 '\\' => {
-                    self.advance();
-                    if self.is_eof() {
-                        break;
-                    }
-                    let escaped = self.chars[self.pos];
-                    match escaped {
-                        'n' => string.push('\n'),
-                        '0' => string.push('0'),
-                        '\\' => string.push('\\'),
-                        e => return Err(Error::InvalidEscape { escape: format!("\\{}", e), span })
-                    }
+                    if self.peek().is_none() { break; }
+                    string.push(self.lex_escape()?);
+                    continue;
                 }
                 '"' => {
                     self.advance();
@@ -237,9 +260,7 @@ impl Lexer {
         let mut string = String::new();
         while !self.is_eof() {
             let c = self.chars[self.pos];
-            if !matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_') {
-                break;
-            }
+            if !matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_') { break; }
             string.push(c);
             self.advance();
         }
@@ -255,6 +276,7 @@ impl Lexer {
             "f64" => TokenKind::F64,
             "f32" => TokenKind::F32,
             "bool" => TokenKind::Bool,
+            "char" => TokenKind::Char,
             "str" => TokenKind::Str,
             "void" => TokenKind::Void,
             "fn" => TokenKind::Fn,
@@ -269,6 +291,8 @@ impl Lexer {
             "while" => TokenKind::While,
             "for" => TokenKind::For,
             "in" => TokenKind::In,
+            "continue" => TokenKind::Continue,
+            "break" => TokenKind::Break,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             _ => TokenKind::Identifier(string)
