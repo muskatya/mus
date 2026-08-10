@@ -35,6 +35,12 @@ pub enum Error {
     TooManyPoints {
         span: Span
     },
+    EmptyChar {
+        span: Span
+    },
+    UnclosedChar {
+        span: Span
+    },
     InvalidEscape {
         escape: String,
         span: Span
@@ -72,6 +78,12 @@ pub enum Error {
         ident: String,
         span: Span
     },
+    ContinueOutsideOfLoop {
+        span: Span
+    },
+    BreakOutsideOfLoop {
+        span: Span
+    },
     LLVMError {
         error: String
     }
@@ -82,6 +94,8 @@ impl fmt::Display for Error {
         match self {
             Error::IllegalChar { ch, span } => write!(f, "Illegal character '{}' at {}:{}", ch, span.line, span.col),
             Error::TooManyPoints { span } => write!(f, "Too many points at {}:{}", span.line, span.col),
+            Error::EmptyChar { span } => write!(f, "Empty character at {}:{}", span.line, span.col),
+            Error::UnclosedChar { span } => write!(f, "Unterminated character at {}:{}", span.line, span.col),
             Error::InvalidEscape { escape, span } => write!(f, "Invalid escape '{}' at {}:{}", escape, span.line, span.col),
             Error::UnterminatedString { span } => write!(f, "Unterminated string at {}:{}", span.line, span.col),
             Error::UnterminatedComment { span } => write!(f, "Unterminated comment at {}:{}", span.line, span.col),
@@ -91,7 +105,9 @@ impl fmt::Display for Error {
             Error::UnexpectedType { expected, got, span } => write!(f, "Expected {} type, got {} at {}:{}", expected.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "), got, span.line, span.col),
             Error::UndefinedVariable { ident, span } => write!(f, "Undefined variable '{}' at {}:{}", ident, span.line, span.col),
             Error::UndefinedFunction { ident, span } => write!(f, "Undefined function '{}' at {}:{}", ident, span.line, span.col),
-            Error::InvalidAssignment { ident, span } => write!(f, "Invalid assignment to '{}' at {}:{}", ident, span.line, span.col),
+            Error::InvalidAssignment { ident, span } => write!(f, "Invalid assignment to constant '{}' at {}:{}", ident, span.line, span.col),
+            Error::ContinueOutsideOfLoop { span } => write!(f, "Continue outside of loop at {}:{}", span.line, span.col),
+            Error::BreakOutsideOfLoop { span } => write!(f, "Break outside of loop at {}:{}", span.line, span.col),
             Error::LLVMError { error } => write!(f, "LLVM error: {}", error),
         }
     }
