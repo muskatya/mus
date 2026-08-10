@@ -3,6 +3,7 @@ mod modules;
 use crate::errors::{Spanned, Error};
 use crate::parser::ast::*;
 
+use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::builder::Builder;
@@ -24,6 +25,8 @@ pub struct Codegen<'ctx> {
     pub builder: Builder<'ctx>,
     pub functions: HashMap<String, FunctionValue<'ctx>>,
     pub current_function: Option<FunctionValue<'ctx>>,
+    pub continue_block: Option<BasicBlock<'ctx>>,
+    pub break_block: Option<BasicBlock<'ctx>>,
     pub variables: HashMap<String, Variable<'ctx>>,
 }
 
@@ -35,6 +38,8 @@ impl<'ctx> Codegen<'ctx> {
             builder: context.create_builder(),
             functions: HashMap::new(),
             current_function: None,
+            continue_block: None,
+            break_block: None,
             variables: HashMap::new()
         }
     }
@@ -51,7 +56,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::I64 | Type::U64 => self.context.i64_type().into(),
             Type::I32 | Type::U32 => self.context.i32_type().into(),
             Type::I16 | Type::U16 => self.context.i16_type().into(),
-            Type::I8 | Type::U8 => self.context.i8_type().into(),
+            Type::I8 | Type::U8 | Type::Char => self.context.i8_type().into(),
             Type::F64 => self.context.f64_type().into(),
             Type::F32 => self.context.f32_type().into(),
             Type::Bool => self.context.bool_type().into(),
@@ -83,6 +88,7 @@ impl<'ctx> Codegen<'ctx> {
             Expression::Integer(_) => Type::I32,
             Expression::Float(_) => Type::F64,
             Expression::Bool(_) => Type::Bool,
+            Expression::Char(_) => Type::Char,
             Expression::String(_) => Type::Str,
             Expression::Identifier(ident) => self.basic_to_type(
                 Some(self.variables.get(ident).ok_or_else(|| Error::UndefinedVariable { ident: ident.clone(), span: expr.span })?.ty)
@@ -310,6 +316,10 @@ impl<'ctx> Codegen<'ctx> {
                 let cond_block = self.context.append_basic_block(current_function, "while_cond_block");
                 let do_block = self.context.append_basic_block(current_function, "while_do_block");
                 let merge_block = self.context.append_basic_block(current_function, "while_merge_block");
+                let old_continue = self.continue_block;
+                let old_break = self.break_block;
+                self.continue_block = Some(cond_block);
+                self.break_block = Some(merge_block);
                 self.builder.build_unconditional_branch(cond_block)
                     .map_err(|e| Error::LLVMError { error: e.to_string() })?;
                 self.builder.position_at_end(cond_block);
@@ -328,6 +338,20 @@ impl<'ctx> Codegen<'ctx> {
                         .map_err(|e| Error::LLVMError { error: e.to_string() })?;
                 }
                 self.builder.position_at_end(merge_block);
+                self.continue_block = old_continue;
+                self.break_block = old_break;
+            },
+            Statement::Continue(span) => {
+                let target_block = self.continue_block
+                    .ok_or_else(|| Error::ContinueOutsideOfLoop { span: *span })?;
+                self.builder.build_unconditional_branch(target_block)
+                    .map_err(|e| Error::LLVMError { error: e.to_string() })?;
+            },
+            Statement::Break(span) => {
+                let target_block = self.break_block
+                    .ok_or_else(|| Error::BreakOutsideOfLoop { span: *span })?;
+                self.builder.build_unconditional_branch(target_block)
+                    .map_err(|e| Error::LLVMError { error: e.to_string() })?;
             },
             Statement::Return(expr) => match expr {
                 Some(e) => {
@@ -361,6 +385,7 @@ impl<'ctx> Codegen<'ctx> {
             Expression::Integer(num) => self.context.i32_type().const_int(*num as u64, false).into(),
             Expression::Float(num) => self.context.f64_type().const_float(*num).into(),
             Expression::Bool(num) => self.context.bool_type().const_int(*num as u64, false).into(),
+            Expression::Char(ch) => self.context.i8_type().const_int(*ch as u64, false).into(),
             Expression::String(string) => {
                 let ptr = self.builder.build_global_string_ptr(string, "str")
                     .map_err(|e| Error::LLVMError { error: e.to_string() })?;
