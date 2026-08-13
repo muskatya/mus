@@ -62,8 +62,16 @@ impl Lexer {
                 ';' => self.tokens.push(Token::new(TokenKind::Semicolon, self.span())),
                 '/' => {
                     match self.peek() {
-                        Some('/') => { self.skip_oneline_comment(); continue; },
-                        Some('*') => { self.skip_multiline_comment()?; continue; },
+                        Some('/') => {
+                            self.advance();
+                            self.advance();
+                            self.skip_oneline_comment();
+                            continue;
+                        },
+                        Some('*') => {
+                            self.skip_multiline_comment()?;
+                            continue;
+                        },
                         _ => self.tokens.push(Token::new(TokenKind::Slash, self.span()))
                     }
                 },
@@ -173,7 +181,6 @@ impl Lexer {
     fn skip_oneline_comment(&mut self) {
         while !self.is_eof() {
             if self.chars[self.pos] == '\n' {
-                self.advance();
                 break;
             }
             self.advance();
@@ -182,11 +189,19 @@ impl Lexer {
 
     fn skip_multiline_comment(&mut self) -> Result<(), Error> {
         let span = self.span();
+        self.advance();
+        self.advance();
         while !self.is_eof() {
             if self.chars[self.pos] == '*' && let Some(n) = self.peek() && n == '/' {
                 self.advance();
                 self.advance();
                 return Ok(());
+            }
+            if self.chars[self.pos] == '\n' {
+                self.pos += 1;
+                self.line += 1;
+                self.col = 1;
+                continue;
             }
             self.advance();
         }
