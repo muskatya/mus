@@ -13,38 +13,45 @@ use std::fs;
 #[command(name = "mus", version = "0.2.0", about = "Mus programming language")]
 enum Cli {
     /// Run Mus program using JIT compilation
-    Run
-}
-
-fn run_file() -> Result<(), ()> {
-    let source = fs::read_to_string("main.mus").map_err(|e| {
-        eprintln!("{}: {}", "error".red().bold(), e);
-    })?;
-    let mut lex = lexer::Lexer::new(source);
-    lex.tokenize().map_err(|e| {
-        eprintln!("{}: {}", "error".red().bold(), e);
-    })?;
-    let mut parse = parser::Parser::new(lex.tokens);
-    let program = parse.parse_program().map_err(|e| {
-        eprintln!("{}: {}", "error".red().bold(), e);
-    })?;
-    let context = Context::create();
-    let mut codegenerator = codegen::Codegen::new(&context);
-    codegenerator.compile_program(program).map_err(|e| {
-        eprintln!("{}: {}", "error".red().bold(), e);
-    })?;
-    codegenerator.run_jit().map_err(|e| {
-        eprintln!("{}: {}", "error".red().bold(), e);
-    })?;
-    Ok(())
+    Run,
+    /// Compile Mus program to an executable
+    Build
 }
 
 fn main() {
     let cli = Cli::parse();
-    let result = match cli {
-        Cli::Run => run_file()
+    let source = match fs::read_to_string("main.mus") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}: {}", "error".red(), e);
+            process::exit(1);
+        }
     };
-    if result.is_err() {
-        process::exit(1)
+    let mut lex = lexer::Lexer::new(source);
+    if let Err(e) = lex.tokenize() {
+        eprintln!("{}: {}", "error".red(), e);
+        process::exit(1);
+    }
+    let mut parse = parser::Parser::new(lex.tokens);
+    let program = match parse.parse_program() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}: {}", "error".red(), e);
+            process::exit(1);
+        }
+    };
+    let context = Context::create();
+    let mut codegenerator = codegen::Codegen::new(&context);
+    if let Err(e) = codegenerator.compile_program(program) {
+        eprintln!("{}: {}", "error".red(), e);
+        process::exit(1);
+    }
+    let result = match cli {
+        Cli::Run => codegenerator.run_jit(),
+        Cli::Build => codegenerator.compile_to_executable()
+    };
+    if let Err(e) = result {
+        eprintln!("{}: {}", "error".red(), e);
+        process::exit(1);
     }
 }
