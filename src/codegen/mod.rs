@@ -3,18 +3,23 @@ mod modules;
 use crate::errors::{Spanned, Error};
 use crate::parser::ast::*;
 
-use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::builder::Builder;
 use inkwell::OptimizationLevel;
+use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
+use inkwell::basic_block::BasicBlock;
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
 
 pub struct FunctionInfo<'ctx> {
     pub value: FunctionValue<'ctx>,
+    pub param_types: Vec<Type>,
     pub ret_type: Type
 }
 
@@ -57,6 +62,22 @@ impl<'ctx> Codegen<'ctx> {
             .is_some()
     }
 
+    fn infer_int_type(value: i64) -> Type {
+        if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
+            Type::I32
+        } else {
+            Type::I64
+        }
+    }
+
+    fn infer_float_type(value: f64) -> Type {
+        if value >= f32::MIN as f64 && value <= f32::MAX as f64 {
+            Type::F32
+        } else {
+            Type::F64
+        }
+    }
+
     fn type_to_basic(&self, ty: &Spanned<Type>) -> Result<BasicTypeEnum<'ctx>, Error> {
         let basic = match ty.node {
             Type::I64 | Type::U64 => self.context.i64_type().into(),
@@ -80,14 +101,21 @@ impl<'ctx> Codegen<'ctx> {
 
     fn expr_to_type(&self, expr: &Spanned<Expression>) -> Result<Type, Error> {
         let ty = match &expr.node {
-            Expression::Integer(_) => Type::I32,
-            Expression::Float(_) => Type::F64,
+            Expression::Integer(i) => Self::infer_int_type(*i),
+            Expression::Float(f) => Self::infer_float_type(*f),
             Expression::Bool(_) => Type::Bool,
             Expression::Char(_) => Type::Char,
             Expression::String(_) => Type::Str,
             Expression::Identifier(ident) => self.variables.get(ident)
                 .ok_or_else(|| Error::UndefinedVariable { ident: ident.clone(), span: expr.span })?.ast_ty.clone(),
-            Expression::BinOp { left, right, .. } => {
+            Expression::BinOp { left, right, op } => {
+                if matches!(op, 
+                    BinOp::Eq | BinOp::Greater | BinOp::Lower |
+                    BinOp::GreaterEq | BinOp::LowerEq | BinOp::NotEq |
+                    BinOp::And | BinOp::Or
+                ) {
+                    return Ok(Type::Bool);
+                }
                 let left_ty = self.expr_to_type(left)?;
                 let right_ty = self.expr_to_type(right)?;
                 if left_ty == right_ty { left_ty } else {
@@ -121,6 +149,65 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    fn cast_value(&mut self, expr: &Spanned<Expression>, ty: &Spanned<Type>) -> Result<BasicValueEnum<'ctx>, Error> {
+        let val = self.compile_some_expr(expr)?;
+        let target_type = self.type_to_basic(ty)?;
+        if val.get_type() == target_type {
+            return Ok(val);
+        }
+        let is_signed_from = matches!(self.expr_to_type(expr)?, Type::I64 | Type::I32 | Type::I16 | Type::I8);
+        let is_signed_to = matches!(ty.node, Type::I64 | Type::I32 | Type::I16 | Type::I8);
+        match target_type {
+            BasicTypeEnum::IntType(int_type) => match val {
+                BasicValueEnum::IntValue(int_value) => if int_value.get_type().get_bit_width() > int_type.get_bit_width() {
+                    self.builder.build_int_truncate(int_value, int_type, "int_trunc")
+                } else {
+                    if is_signed_from {
+                        self.builder.build_int_s_extend(int_value, int_type, "int_sext")
+                    } else {
+                        self.builder.build_int_z_extend(int_value, int_type, "uint_zext")
+                    }
+                }
+                    .map_err(|e| Error::LLVMError { error: e.to_string() }).map(|v| v.into()),
+                BasicValueEnum::FloatValue(float_value) => if is_signed_to {
+                    self.builder.build_float_to_signed_int(float_value, int_type, "int_to_float")
+                } else {
+                    self.builder.build_float_to_unsigned_int(float_value, int_type, "uint_to_float")
+                }
+                    .map_err(|e| Error::LLVMError { error: e.to_string() }).map(|v| v.into()),
+                _ => return Err(Error::UnexpectedType { expected: vec![
+                    Type::I64, Type::I32, Type::I16, Type::I8,
+                    Type::U64, Type::U32, Type::U16, Type::U8,
+                    Type::F64, Type::F32
+                ], got: self.expr_to_type(expr)?, span: expr.span })
+            },
+            BasicTypeEnum::FloatType(float_type) => match val {
+                BasicValueEnum::IntValue(int_value) => if is_signed_from {
+                    self.builder.build_signed_int_to_float(int_value, float_type, "float_to_int")
+                } else {
+                    self.builder.build_unsigned_int_to_float(int_value, float_type, "float_to_uint")
+                }
+                    .map_err(|e| Error::LLVMError { error: e.to_string() }).map(|v| v.into()),
+                BasicValueEnum::FloatValue(float_value) => if float_value.get_type().get_bit_width() > float_type.get_bit_width() {
+                    self.builder.build_float_trunc(float_value, float_type, "float_trunc")
+                } else {
+                    self.builder.build_float_ext(float_value, float_type, "float_ext")
+                }
+                    .map_err(|e| Error::LLVMError { error: e.to_string() }).map(|v| v.into()),
+                _ => return Err(Error::UnexpectedType { expected: vec![
+                    Type::I64, Type::I32, Type::I16, Type::I8,
+                    Type::U64, Type::U32, Type::U16, Type::U8,
+                    Type::F64, Type::F32
+                ], got: self.expr_to_type(expr)?, span: expr.span })
+            },
+            _ => return Err(Error::UnexpectedType { expected: vec![
+                Type::I64, Type::I32, Type::I16, Type::I8,
+                Type::U64, Type::U32, Type::U16, Type::U8,
+                Type::F64, Type::F32
+            ], got: ty.node.clone(), span: ty.span })
+        }
+    }
+
     pub fn compile_program(&mut self, program: Program) -> Result<(), Error> {
         self.compile_imports(&program.imports)?;
         for fn_extern in &program.externs {
@@ -147,6 +234,39 @@ impl<'ctx> Codegen<'ctx> {
         Ok(())
     }
 
+    pub fn compile_to_executable(&self) -> Result<(), Error> {
+        Target::initialize_all(&InitializationConfig::default());
+        let triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&triple)
+            .map_err(|e| Error::LLVMError { error: e.to_string() })?;
+        let target_machine = target.create_target_machine(
+            &triple,
+            TargetMachine::get_host_cpu_name().to_str()
+                .map_err(|e| Error::LLVMError { error: e.to_string() })?,
+            TargetMachine::get_host_cpu_features().to_str()
+                .map_err(|e| Error::LLVMError { error: e.to_string() })?,
+            OptimizationLevel::Default,
+            RelocMode::PIC,
+            CodeModel::Default
+        ).ok_or_else(|| Error::LLVMError { 
+            error: "Failed to create target machine".to_string()
+        })?;
+        let obj_name = if cfg!(target_os = "windows") { "main.obj" } else { "main.o" };
+        target_machine.write_to_file(&self.module, FileType::Object, &Path::new(obj_name))
+            .map_err(|e| Error::LLVMError { error: e.to_string() })?;
+        let res = if cfg!(target_os = "windows") {
+            Command::new("link.exe").args(&[obj_name, "/out:main.exe", "/entry:main", "/subsystem:console", "/defaultlib:msvcrt"]).status()
+        } else {
+            Command::new("cc").args(&[obj_name, "-o", "main", "-lc"]).status()
+        }
+            .map_err(|e| Error::LLVMError { error: format!("Failed to execute linker: {}", e) })?;
+        if !res.success() {
+            return Err(Error::LLVMError { error: format!("Linker failed with exit code: {:?}", res.code())  });
+        }
+        let _ = fs::remove_file(obj_name);
+        Ok(())
+    }
+
     fn compile_imports(&mut self, imports: &Vec<Import>) -> Result<(), Error> {
         let mut module_system = modules::ModuleSystem::new();
         for import in imports {
@@ -170,42 +290,46 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn declare_extern(&mut self, fn_extern: &Extern) -> Result<(), Error> {
-        let mut param_types = Vec::new();
+        let mut ast_param_type = Vec::new();
+        let mut metadata_param_types = Vec::new();
         let mut is_var_args = false;
         for param in &fn_extern.params {
             if param.ty.node == Type::Ellipsis {
                 is_var_args = true;
                 continue;
             }
-            param_types.push(self.type_to_basic(&param.ty)?.into());
+            ast_param_type.push(param.ty.node.clone());
+            metadata_param_types.push(self.type_to_basic(&param.ty)?.into());
         }
         let fn_type = if fn_extern.ret_type.node == Type::Void {
-            self.context.void_type().fn_type(&param_types, is_var_args)
+            self.context.void_type().fn_type(&metadata_param_types, is_var_args)
         } else {
-            self.type_to_basic(&fn_extern.ret_type)?.fn_type(&param_types, is_var_args)
+            self.type_to_basic(&fn_extern.ret_type)?.fn_type(&metadata_param_types, is_var_args)
         };
         let value = self.module.add_function(fn_extern.name.as_str(), fn_type, None);
-        self.functions.insert(fn_extern.name.clone(), FunctionInfo { value, ret_type: fn_extern.ret_type.node.clone() });
+        self.functions.insert(fn_extern.name.clone(), FunctionInfo { value, param_types: ast_param_type, ret_type: fn_extern.ret_type.node.clone() });
         Ok(())
     }
 
     fn declare_function(&mut self, function: &Function) -> Result<(), Error> {
-        let mut param_types = Vec::new();
+        let mut ast_param_type = Vec::new();
+        let mut metadata_param_types = Vec::new();
         let mut is_var_args = false;
         for param in &function.params {
             if param.ty.node == Type::Ellipsis {
                 is_var_args = true;
                 break;
             }
-            param_types.push(self.type_to_basic(&param.ty)?.into());
+            ast_param_type.push(param.ty.node.clone());
+            metadata_param_types.push(self.type_to_basic(&param.ty)?.into());
         }
         let fn_type = if function.ret_type.node == Type::Void {
-            self.context.void_type().fn_type(&param_types, is_var_args)
+            self.context.void_type().fn_type(&metadata_param_types, is_var_args)
         } else {
-            self.type_to_basic(&function.ret_type)?.fn_type(&param_types, is_var_args)
+            self.type_to_basic(&function.ret_type)?.fn_type(&metadata_param_types, is_var_args)
         };
         let value = self.module.add_function(function.name.as_str(), fn_type, None);
-        self.functions.insert(function.name.clone(), FunctionInfo { value, ret_type: function.ret_type.node.clone() });
+        self.functions.insert(function.name.clone(), FunctionInfo { value, param_types: ast_param_type, ret_type: function.ret_type.node.clone() });
         Ok(())
     }
 
@@ -250,13 +374,19 @@ impl<'ctx> Codegen<'ctx> {
             Statement::Var { ident, ty, val } => self.compile_variable(ident, ty, val, false)?,
             Statement::Const { ident, ty, val } => self.compile_variable(ident, ty, val, true)?,
             Statement::Assign { ident, val } => {
-                let compiled_val = self.compile_some_expr(val)?;
-                let var = self.variables.get(&ident.node)
-                    .ok_or_else(|| Error::UndefinedVariable { ident: ident.node.clone(), span: ident.span })?;
-                if var.is_const {
-                    return Err(Error::InvalidAssignment { ident: ident.node.clone(), span: ident.span });
-                }
-                self.builder.build_store(var.ptr, compiled_val)
+                let (var_ptr, var_ty) = {
+                    let var = self.variables.get(&ident.node)
+                        .ok_or_else(|| Error::UndefinedVariable { ident: ident.node.clone(), span: ident.span })?;
+                    if var.is_const {
+                        return Err(Error::InvalidAssignment { ident: ident.node.clone(), span: ident.span });
+                    }
+                    (var.ptr, var.ast_ty.clone())
+                };
+                let compiled_val = self.cast_value(val, &Spanned::new(
+                    var_ty,
+                    ident.span
+                ))?;
+                self.builder.build_store(var_ptr, compiled_val)
                     .map_err(|e| Error::LLVMError { error: e.to_string() })?;
             },
             Statement::If { condition, then_br, else_br } => {
@@ -348,7 +478,10 @@ impl<'ctx> Codegen<'ctx> {
             },
             Statement::Return(expr) => match expr {
                 Some(e) => {
-                    let val = self.compile_some_expr(e)?;
+                    let ret_type = self.functions.values()
+                        .find(|f| f.value == self.current_function.unwrap()).unwrap()
+                        .ret_type.clone();
+                    let val = self.cast_value(e, &Spanned::new(ret_type, e.span))?;
                     self.builder.build_return(Some(&val as &dyn BasicValue))
                         .map_err(|e| Error::LLVMError { error: e.to_string() })?;
                 },
@@ -363,7 +496,7 @@ impl<'ctx> Codegen<'ctx> {
     fn compile_variable(&mut self, ident: &str, ty: &Option<Spanned<Type>>, val: &Spanned<Expression>, is_const: bool) -> Result<(), Error> {
         let ast_ty = &ty.clone().unwrap_or(Spanned::new(self.expr_to_type(val)?, val.span));
         let basic_ty = self.type_to_basic(ast_ty)?;
-        let val = self.compile_some_expr(val)?;
+        let val = self.cast_value(val, ast_ty)?;
         let ptr = self.builder.build_alloca(basic_ty, ident)
             .map_err(|e| Error::LLVMError { error: e.to_string() })?;
         self.builder.build_store(ptr, val)
@@ -374,8 +507,18 @@ impl<'ctx> Codegen<'ctx> {
 
     fn compile_expr(&mut self, expression: &Spanned<Expression>) -> Result<Option<BasicValueEnum<'ctx>>, Error> {
         let compiled: BasicValueEnum<'ctx> = match &expression.node {
-            Expression::Integer(num) => self.context.i32_type().const_int(*num as u64, true).into(),
-            Expression::Float(num) => self.context.f64_type().const_float(*num).into(),
+            Expression::Integer(i) => match Self::infer_int_type(*i) {
+                Type::I64 => self.context.i64_type().const_int(*i as u64, true).into(),
+                Type::I32 => self.context.i32_type().const_int(*i as u64, true).into(),
+                Type::I16 => self.context.i16_type().const_int(*i as u64, true).into(),
+                Type::I8 => self.context.i8_type().const_int(*i as u64, true).into(),
+                _ => unreachable!()
+            },
+            Expression::Float(f) => match Self::infer_float_type(*f) {
+                Type::F64 => self.context.f64_type().const_float(*f).into(),
+                Type::F32 => self.context.f32_type().const_float(*f).into(),
+                _ => unreachable!()
+            },
             Expression::Bool(num) => self.context.bool_type().const_int(*num as u64, false).into(),
             Expression::Char(ch) => self.context.i8_type().const_int(*ch as u64, false).into(),
             Expression::String(string) => {
@@ -419,64 +562,24 @@ impl<'ctx> Codegen<'ctx> {
                 }
             },
             Expression::Call { ident, args } => {
-                let func = self.functions.get(&ident.node)
-                    .ok_or_else(|| Error::UndefinedFunction { ident: ident.node.clone(), span: ident.span })?
-                    .value
-                    .clone();
+                let (func_val, param_types) = {
+                    let func = self.functions.get(&ident.node)
+                        .ok_or_else(|| Error::UndefinedFunction { ident: ident.node.clone(), span: ident.span })?;
+                    (func.value.clone(), func.param_types.clone())
+                };
                 let mut compiled_args = Vec::new();
-                for arg in args {
-                    compiled_args.push(self.compile_some_expr(arg)?.into());
+                for (i, arg) in args.iter().enumerate() {
+                    if let Some(param_type) = param_types.get(i) {
+                        compiled_args.push(self.cast_value(arg, &Spanned::new(param_type.clone(), arg.span))?.into());
+                    } else {
+                        compiled_args.push(self.compile_some_expr(arg)?.into());
+                    }
                 }
-                let call = self.builder.build_call(func, &compiled_args, "call")
+                let call = self.builder.build_call(func_val, &compiled_args, "call")
                     .map_err(|e| Error::LLVMError { error: e.to_string() })?;
-                return Ok(call.try_as_basic_value().basic())
+                return Ok(call.try_as_basic_value().basic());
             },
-            Expression::As { expr, ty } => {
-                let val = self.compile_some_expr(expr)?;
-                let target_type = self.type_to_basic(ty)?;
-                if val.get_type() == target_type {
-                    return Ok(Some(val));
-                }
-                match target_type {
-                    BasicTypeEnum::IntType(int_type) => match val {
-                        BasicValueEnum::IntValue(int_value) => if int_value.get_type().get_bit_width() > int_type.get_bit_width() {
-                            self.builder.build_int_truncate(int_value, int_type, "int_trunc")
-                                .map_err(|e| Error::LLVMError { error: e.to_string() })?.into()
-                        } else {
-                            self.builder.build_int_s_extend(int_value, int_type, "int_sext")
-                                .map_err(|e| Error::LLVMError { error: e.to_string() })?.into()
-                        },
-                        BasicValueEnum::FloatValue(float_value) => self.builder.build_float_to_signed_int(float_value, int_type, "int_to_float")
-                            .map_err(|e| Error::LLVMError { error: e.to_string() })?.into(),
-                        _ => return Err(Error::UnexpectedType { expected: vec![
-                            Type::I64, Type::I32, Type::I16, Type::I8,
-                            Type::U64, Type::U32, Type::U16, Type::U8,
-                            Type::F64, Type::F32
-                        ], got: self.expr_to_type(expr)?, span: expr.span })
-                    },
-                    BasicTypeEnum::FloatType(float_type) => match val {
-                        BasicValueEnum::IntValue(int_value) => self.builder.build_signed_int_to_float(int_value, float_type, "float_to_int")
-                            .map_err(|e| Error::LLVMError { error: e.to_string() })?.into(),
-                        BasicValueEnum::FloatValue(float_value) => if float_value.get_type().get_bit_width() > float_type.get_bit_width() {
-                            self.builder.build_float_trunc(float_value, float_type, "float_trunc")
-                                .map_err(|e| Error::LLVMError { error: e.to_string() })?.into()
-                        } else {
-                            self.builder.build_float_ext(float_value, float_type, "float_ext")
-                                .map_err(|e| Error::LLVMError { error: e.to_string() })?.into()
-                        },
-                        _ => return Err(Error::UnexpectedType { expected: vec![
-                            Type::I64, Type::I32, Type::I16, Type::I8,
-                            Type::U64, Type::U32, Type::U16, Type::U8,
-                            Type::F64, Type::F32
-                        ], got: self.expr_to_type(expr)?, span: expr.span })
-                    },
-                    _ => return Err(Error::UnexpectedType { expected: vec![
-                        Type::I64, Type::I32, Type::I16, Type::I8,
-                        Type::U64, Type::U32, Type::U16, Type::U8,
-                        Type::F64, Type::F32
-                    ], got: ty.node.clone(), span: ty.span })
-                }
-            }
+            Expression::As { expr, ty } => self.cast_value(expr, ty)?
         };
         Ok(Some(compiled))
     }
@@ -530,18 +633,41 @@ impl<'ctx> Codegen<'ctx> {
         let left = self.compile_some_expr(left_expr)?;
         let right = self.compile_some_expr(right_expr)?;
         match (left, right) {
-            (BasicValueEnum::IntValue(left_val), BasicValueEnum::IntValue(right_val)) => match op {
-                BinOp::Plus => self.builder.build_int_add(left_val, right_val, "int_add"),
-                BinOp::Minus => self.builder.build_int_sub(left_val, right_val, "int_sub"),
-                BinOp::Multiply => self.builder.build_int_mul(left_val, right_val, "int_mul"),
-                BinOp::Divide => self.builder.build_int_signed_div(left_val, right_val, "int_div"),
-                BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, left_val, right_val, "int_eq"),
-                BinOp::Greater => self.builder.build_int_compare(IntPredicate::SGT, left_val, right_val, "int_sgt"),
-                BinOp::Lower => self.builder.build_int_compare(IntPredicate::SLT, left_val, right_val, "int_slt"),
-                BinOp::GreaterEq => self.builder.build_int_compare(IntPredicate::SGE, left_val, right_val, "int_sge"),
-                BinOp::LowerEq => self.builder.build_int_compare(IntPredicate::SLE, left_val, right_val, "int_sle"),
-                BinOp::NotEq => self.builder.build_int_compare(IntPredicate::NE, left_val, right_val, "int_ne"),
-                _ => unreachable!()
+            (BasicValueEnum::IntValue(left_val), BasicValueEnum::IntValue(right_val)) => {
+                let is_signed = matches!(self.expr_to_type(left_expr)?, Type::I64 | Type::I32 | Type::I16 | Type::I8);
+                match op {
+                    BinOp::Plus => self.builder.build_int_add(left_val, right_val, "int_add"),
+                    BinOp::Minus => self.builder.build_int_sub(left_val, right_val, "int_sub"),
+                    BinOp::Multiply => self.builder.build_int_mul(left_val, right_val, "int_mul"),
+                    BinOp::Divide => if is_signed {
+                        self.builder.build_int_signed_div(left_val, right_val, "int_div")
+                    } else {
+                        self.builder.build_int_unsigned_div(left_val, right_val, "uint_div")
+                    },
+                    BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, left_val, right_val, "int_eq"),
+                    BinOp::Greater => if is_signed {
+                        self.builder.build_int_compare(IntPredicate::SGT, left_val, right_val, "int_sgt")
+                    } else {
+                        self.builder.build_int_compare(IntPredicate::UGT, left_val, right_val, "uint_sgt")
+                    },
+                    BinOp::Lower => if is_signed {
+                        self.builder.build_int_compare(IntPredicate::SLT, left_val, right_val, "int_slt")
+                    } else {
+                        self.builder.build_int_compare(IntPredicate::ULT, left_val, right_val, "uint_slt")
+                    },
+                    BinOp::GreaterEq => if is_signed {
+                        self.builder.build_int_compare(IntPredicate::SGE, left_val, right_val, "int_sge")
+                    } else {
+                        self.builder.build_int_compare(IntPredicate::UGE, left_val, right_val, "uint_sge")
+                    },
+                    BinOp::LowerEq => if is_signed {
+                        self.builder.build_int_compare(IntPredicate::SLE, left_val, right_val, "int_sle")
+                    } else {
+                        self.builder.build_int_compare(IntPredicate::ULE, left_val, right_val, "uint_sle")
+                    },
+                    BinOp::NotEq => self.builder.build_int_compare(IntPredicate::NE, left_val, right_val, "int_ne"),
+                    _ => unreachable!()
+                }
             }
                 .map_err(|e| Error::LLVMError { error: e.to_string() })
                 .map(|res| res.into()),
